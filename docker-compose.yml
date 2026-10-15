@@ -1,0 +1,119 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    restart: always
+    environment:
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+      POSTGRES_DB: ${DB_NAME:-jungle_gaming}
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME:-jungle_gaming}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  ministack:
+    image: pitakill/ministack:latest
+    restart: always
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=sqs
+      - AWS_DEFAULT_REGION=us-east-1
+    volumes:
+      - ./deployments/ministack/init-sqs.sh:/etc/localstack/init/ready.d/init-sqs.sh:ro
+      - ./deployments/ministack/init-sqs.sh:/init-sqs.sh:ro
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request, json; res = json.loads(urllib.request.urlopen('http://localhost:4566/_localstack/health').read().decode()); exit(0 if res.get('services', {}).get('sqs') in ('available', 'running') else 1)"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+    networks:
+      default:
+        aliases:
+          - localstack
+          - ministack
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:24.0
+    restart: always
+    ports:
+      - "8081:8080"
+    environment:
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN_USER:-admin}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
+    volumes:
+      - ./deployments/keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
+    command: start-dev --import-realm --health-enabled=true
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/8080 && echo -e 'GET /realms/jungle-gaming HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && cat <&3 | grep -q '200 OK' || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 15s
+
+  migrate:
+    build:
+      context: .
+      target: runtime
+    entrypoint: ["/bin/goose", "-dir", "/migrations", "postgres", "postgres://${DB_USER:-postgres}:${DB_PASSWORD:-postgres}@postgres:5432/${DB_NAME:-jungle_gaming}?sslmode=disable", "up"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build:
+      context: .
+      target: runtime
+    entrypoint: ["/bin/api"]
+    ports:
+      - "${HTTP_PORT:-8080}:8080"
+    environment:
+      - HTTP_PORT=8080
+      - DATABASE_URL=postgres://${DB_USER:-postgres}:${DB_PASSWORD:-postgres}@postgres:5432/${DB_NAME:-jungle_gaming}?sslmode=disable
+      - KEYCLOAK_ISSUER_URL=http://keycloak:8080/realms/jungle-gaming
+      - AWS_ENDPOINT_URL=http://ministack:4566
+      - AWS_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-test}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-test}
+      - SQS_QUEUE_URL=http://ministack:4566/000000000000/wager-transactions.fifo
+      - SQS_DLQ_URL=http://ministack:4566/000000000000/wager-transactions-dlq.fifo
+      - SQS_EVENTS_QUEUE_URL=http://ministack:4566/000000000000/wager-events.fifo
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      keycloak:
+        condition: service_healthy
+      ministack:
+        condition: service_healthy
+    restart: always
+
+  worker:
+    build:
+      context: .
+      target: runtime
+    entrypoint: ["/bin/worker"]
+    environment:
+      - DATABASE_URL=postgres://${DB_USER:-postgres}:${DB_PASSWORD:-postgres}@postgres:5432/${DB_NAME:-jungle_gaming}?sslmode=disable
+      - KEYCLOAK_ISSUER_URL=http://keycloak:8080/realms/jungle-gaming
+      - AWS_ENDPOINT_URL=http://ministack:4566
+      - AWS_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-test}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-test}
+      - SQS_QUEUE_URL=http://ministack:4566/000000000000/wager-transactions.fifo
+      - SQS_DLQ_URL=http://ministack:4566/000000000000/wager-transactions-dlq.fifo
+      - SQS_EVENTS_QUEUE_URL=http://ministack:4566/000000000000/wager-events.fifo
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      ministack:
+        condition: service_healthy
+    restart: always
