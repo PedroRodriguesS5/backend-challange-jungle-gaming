@@ -52,7 +52,6 @@ docker compose logs -f api worker
 # Para encerrar todos os serviços e containers:
 docker compose down
 ```
-
 Serviços e portas disponíveis:
 - **API HTTP:** `http://localhost:8080`
 - **Keycloak IdP:** `http://localhost:8081` (Painel Admin: `admin` / `admin`)
